@@ -67,6 +67,9 @@ public enum EmbeddedTerminalLaunchBuilder {
       agentHubCLIPath: agentHubCLIPath,
       installAgentHubWorktreeSkill: {
         AgentHubWorktreeSkillInstaller.installBundledSkillForAllProvidersBestEffort()
+      },
+      removeLegacyAgentHubSessionNamingSkill: {
+        AgentHubSessionNamingSkillCleanup.removeInstalledSkillBestEffort()
       }
     )
   }
@@ -82,6 +85,7 @@ public enum EmbeddedTerminalLaunchBuilder {
     metadataStore: SessionMetadataStore?,
     agentHubCLIPath: String? = nil,
     installAgentHubWorktreeSkill: () -> Void,
+    removeLegacyAgentHubSessionNamingSkill: () -> Void = {},
     xcodeBuildMCPEnabled: Bool = XcodeBuildMCPPreflight.isEnabled(),
     xcodeBuildMCPToolingAvailable: () -> Bool = { XcodeBuildMCPPreflight.nodeToolingAvailable() },
     notifyXcodeBuildMCPToolingMissing: () -> Void = { Task { @MainActor in XcodeBuildMCPNodeNotice.notifyOnce() } }
@@ -103,6 +107,8 @@ public enum EmbeddedTerminalLaunchBuilder {
     guard let executablePath else {
       return .failure(.executableNotFound(cliConfiguration.command))
     }
+
+    removeLegacyAgentHubSessionNamingSkill()
 
     let isNewSession = sessionId == nil || sessionId?.isEmpty == true || sessionId?.hasPrefix("pending-") == true
     if isNewSession {
@@ -145,6 +151,16 @@ public enum EmbeddedTerminalLaunchBuilder {
       sessionId: sessionId,
       prompt: initialPrompt,
       agentHubMCPServerPath: resolvedAgentHubCLIPath,
+      // Baked into the MCP server command rather than inherited: Codex and
+      // Claude each decide for themselves what environment an MCP server is
+      // spawned with, and a stripped AGENTHUB_PROVIDER makes every
+      // session-scoped tool refuse to run.
+      agentHubMCPEnvironment: agentHubSessionEnvironment(
+        agentHubCLIPath: resolvedAgentHubCLIPath,
+        providerKind: providerKind,
+        projectPath: workingDirectory,
+        sessionId: sessionId
+      ),
       dangerouslySkipPermissions: dangerouslySkipPermissions,
       worktreeName: worktreeName,
       permissionModePlan: permissionModePlan,
@@ -197,11 +213,45 @@ public enum EmbeddedTerminalLaunchBuilder {
 
     var paths = CLIPathResolver.executableSearchPaths(additionalPaths: additionalPaths)
     if let agentHubCLIPath, !agentHubCLIPath.isEmpty {
-      environment["AGENTHUB_CLI"] = agentHubCLIPath
       let agentHubCLIDirectory = (agentHubCLIPath as NSString).deletingLastPathComponent
       paths.insert(agentHubCLIDirectory, at: 0)
     }
 
+    environment.merge(
+      agentHubSessionEnvironment(
+        agentHubCLIPath: agentHubCLIPath,
+        providerKind: providerKind,
+        projectPath: projectPath,
+        sessionId: sessionId
+      )
+    ) { _, new in new }
+
+    let pathString = paths.joined(separator: ":")
+    if let existingPath = environment["PATH"] {
+      environment["PATH"] = "\(pathString):\(existingPath)"
+    } else {
+      environment["PATH"] = pathString
+    }
+    environment.merge(CLIEnvironmentOverrides.environment) { _, new in new }
+    return environment
+  }
+
+  /// The `AGENTHUB_*` variables that tell the bundled `agenthub` CLI — and the
+  /// MCP server it hosts — which AgentHub session it is running inside.
+  ///
+  /// Shared by the terminal process environment and the MCP server command so
+  /// the two cannot drift: session-scoped tools (`agenthub_name_session`) fail
+  /// outright when `AGENTHUB_PROVIDER` is missing.
+  static func agentHubSessionEnvironment(
+    agentHubCLIPath: String?,
+    providerKind: SessionProviderKind?,
+    projectPath: String?,
+    sessionId: String?
+  ) -> [String: String] {
+    var environment: [String: String] = [:]
+    if let agentHubCLIPath, !agentHubCLIPath.isEmpty {
+      environment["AGENTHUB_CLI"] = agentHubCLIPath
+    }
     if let providerKind {
       environment["AGENTHUB_PROVIDER"] = providerKind.rawValue
     }
@@ -211,14 +261,6 @@ public enum EmbeddedTerminalLaunchBuilder {
     if let sessionId, !sessionId.isEmpty, !sessionId.hasPrefix("pending-") {
       environment["AGENTHUB_SESSION_ID"] = sessionId
     }
-
-    let pathString = paths.joined(separator: ":")
-    if let existingPath = environment["PATH"] {
-      environment["PATH"] = "\(pathString):\(existingPath)"
-    } else {
-      environment["PATH"] = pathString
-    }
-    environment.merge(CLIEnvironmentOverrides.environment) { _, new in new }
     return environment
   }
 

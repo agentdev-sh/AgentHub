@@ -8,6 +8,7 @@
 import AgentHubGitDiff
 import AgentHubGitHub
 import AgentHubMCPUI
+import Darwin
 import Foundation
 import Combine
 import Canvas
@@ -1838,24 +1839,47 @@ public final class CLISessionsViewModel {
 
   /// Sets a custom name for a session
   public func setCustomName(_ name: String?, for session: CLISession) {
+    setCustomName(name, forSessionId: session.id)
+  }
+
+  /// Sets a custom name using the shared persistence path used by session UI actions.
+  public func setCustomName(_ name: String?, forSessionId sessionId: String) {
     guard let store = metadataStore else { return }
 
     Task {
       do {
-        try await store.setCustomName(name, for: session.id)
+        try await store.setCustomName(name, for: sessionId)
 
-        // Update cache on main actor
-        await MainActor.run {
-          if let name = name, !name.isEmpty {
-            sessionCustomNames[session.id] = name
-          } else {
-            sessionCustomNames.removeValue(forKey: session.id)
-          }
+        if let name = name, !name.isEmpty {
+          sessionCustomNames[sessionId] = name
+        } else {
+          sessionCustomNames.removeValue(forKey: sessionId)
         }
       } catch {
         AppLogger.session.error("Failed to save custom name: \(error.localizedDescription)")
       }
     }
+  }
+
+  /// Resolves the real session currently hosted by an embedded CLI process.
+  public func activeSessionId(forProcessId processId: Int32) -> String? {
+    let candidates = activeTerminals.compactMap { sessionId, terminal -> SessionProcessGroupMatcher.Candidate? in
+      guard !sessionId.hasPrefix("pending-"), let terminalProcessId = terminal.currentProcessPID else {
+        return nil
+      }
+      return SessionProcessGroupMatcher.Candidate(
+        sessionId: sessionId,
+        processId: terminalProcessId
+      )
+    }
+    return SessionProcessGroupMatcher.sessionId(
+      for: processId,
+      candidates: candidates,
+      processGroupId: { candidateProcessId in
+        let groupId = getpgid(candidateProcessId)
+        return groupId > 0 ? groupId : nil
+      }
+    )
   }
 
   /// Loads custom names for all monitored sessions

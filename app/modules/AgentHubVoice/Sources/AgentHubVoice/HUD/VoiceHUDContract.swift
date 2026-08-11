@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import SwiftUI
 
 // MARK: - Presenting
 
@@ -92,6 +93,9 @@ public struct VoiceHUDSettingsKeys: Sendable {
   public let hudFrame: String
   public let screenCaptureEnabled: String
   public let onboardingCompleted: String
+  /// Bool key: show live transcript text in the HUD instead of the voice
+  /// visualizer. Off by default.
+  public let showTranscript: String
 
   public init(
     mode: String,
@@ -103,7 +107,8 @@ public struct VoiceHUDSettingsKeys: Sendable {
     allowBargeIn: String,
     hudFrame: String,
     screenCaptureEnabled: String,
-    onboardingCompleted: String
+    onboardingCompleted: String,
+    showTranscript: String = "voice.showTranscript"
   ) {
     self.mode = mode
     self.realtimeModel = realtimeModel
@@ -115,6 +120,7 @@ public struct VoiceHUDSettingsKeys: Sendable {
     self.hudFrame = hudFrame
     self.screenCaptureEnabled = screenCaptureEnabled
     self.onboardingCompleted = onboardingCompleted
+    self.showTranscript = showTranscript
   }
 }
 
@@ -122,9 +128,17 @@ public struct VoiceHUDConfiguration: Sendable {
   /// Product name used in HUD and onboarding copy (e.g. "AgentHub").
   public let productName: String
   public let settings: VoiceHUDSettingsKeys
+  /// Host brand color for selected/emphasized HUD controls. When nil the HUD
+  /// falls back to the system accent color.
+  public let accentColor: Color?
 
-  public init(productName: String, settings: VoiceHUDSettingsKeys) {
+  public init(
+    productName: String,
+    settings: VoiceHUDSettingsKeys,
+    accentColor: Color? = nil
+  ) {
     self.productName = productName
     self.settings = settings
+    self.accentColor = accentColor
   }
 }

@@ -67,6 +67,23 @@ public final class VoiceHUDViewModel {
     }
   }
 
+  public var assistantLevel: Float {
+    switch mode {
+    case .dictate:
+      0
+    case .converse:
+      engine.assistantLevel
+    }
+  }
+
+  public var isAssistantSpeaking: Bool {
+    mode == .converse && engine.isAssistantSpeaking
+  }
+
+  public var dictationState: DictationState {
+    dictationController?.state ?? .idle
+  }
+
   public var isActive: Bool {
     switch mode {
     case .dictate:

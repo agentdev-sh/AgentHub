@@ -27,6 +27,14 @@ private struct GitHubSheetItem: Identifiable {
   let projectPath: String
 }
 
+// MARK: - ProjectDetailsSheetItem
+
+private struct ProjectDetailsSheetItem: Identifiable {
+  let id = UUID()
+  let projectPath: String
+  let displayName: String
+}
+
 // MARK: - ArchiveConfirmation
 
 private struct ArchiveConfirmation {
@@ -156,6 +164,7 @@ public struct MultiProviderSessionsListView: View {
   @State private var createWorktreeContext: WorktreeCreateContext?
   @State private var startSessionSheetContext: StartSessionSheetContext?
   @State private var gitHubSheetItem: GitHubSheetItem?
+  @State private var projectDetailsSheetItem: ProjectDetailsSheetItem?
   @State private var archiveConfirmation: ArchiveConfirmation?
   @State private var removeConfirmation: RemoveConfirmation?
   @State private var worktreeModuleDeleteConfirmation: WorktreeModuleDeleteConfirmation?
@@ -419,6 +428,21 @@ public struct MultiProviderSessionsListView: View {
         launchViewModel: context.launchViewModel,
         intelligenceViewModel: intelligenceViewModel,
         onDismiss: { startSessionSheetContext = nil }
+      )
+    }
+    .sheet(item: $projectDetailsSheetItem) { item in
+      ProjectDetailsSheetView(
+        modulePath: item.projectPath,
+        displayName: item.displayName,
+        claudeViewModel: claudeViewModel,
+        codexViewModel: codexViewModel,
+        onDismiss: { projectDetailsSheetItem = nil },
+        onSelectSession: { sessionItem in
+          projectDetailsSheetItem = nil
+          selectedWorkspaceID = nil
+          selectedModuleLandingPath = nil
+          primarySessionId = sessionItem.id
+        }
       )
     }
     .modifier(ArchiveConfirmationAlert(confirmation: $archiveConfirmation))
@@ -1350,6 +1374,12 @@ public struct MultiProviderSessionsListView: View {
                 onCreateWorkspace: {
                   createWorkspace(projectPath: group.id)
                 },
+                onShowProjectDetails: {
+                  projectDetailsSheetItem = ProjectDetailsSheetItem(
+                    projectPath: group.id,
+                    displayName: group.displayName
+                  )
+                },
                 onOpenInFinder: {
                   NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: group.id)
                 },
@@ -1391,8 +1421,13 @@ public struct MultiProviderSessionsListView: View {
               )
 
               if isExpanded {
-                workspaceRows(for: groupWorkspaces, ownedItems: workspaceOwnedItems)
-                sessionRows(for: group.items.filter { !isWorkspaceOwned($0) })
+                // Indent module children so the module → session hierarchy reads
+                // at a glance.
+                VStack(alignment: .leading, spacing: 0) {
+                  workspaceRows(for: groupWorkspaces, ownedItems: workspaceOwnedItems)
+                  sessionRows(for: group.items.filter { !isWorkspaceOwned($0) })
+                }
+                .padding(.leading, 12)
               }
             }
 
@@ -2573,6 +2608,7 @@ private struct ProjectGroupHeader: View {
   let repoPath: String
   let onStartSession: () -> Void
   let onCreateWorkspace: () -> Void
+  let onShowProjectDetails: () -> Void
   let onOpenInFinder: () -> Void
   let onOpenGitHub: () -> Void
   let onArchiveSessions: (() -> Void)?
@@ -2612,6 +2648,9 @@ private struct ProjectGroupHeader: View {
       HeaderIconMenu(systemName: "ellipsis", size: 14, help: "More actions") {
         Button(action: onCreateWorkspace) {
           Label("New Workspace", systemImage: "rectangle.3.group")
+        }
+        Button(action: onShowProjectDetails) {
+          Label("Project Details", systemImage: "info.circle")
         }
         Divider()
         Button(action: onOpenInFinder) {
@@ -2837,7 +2876,7 @@ private struct SessionsSectionHeader: View {
   var body: some View {
     VStack(spacing: 0) {
       HStack(spacing: 2) {
-        Text("Sessions")
+        Text("Projects")
           .font(.heading)
           .foregroundColor(.secondary)
 

@@ -17,9 +17,12 @@ public final class VoiceToolCatalog: VoiceToolCataloging {
   private let screenCapture: any VoiceScreenCapturing
   private let isScreenCaptureEnabled: @MainActor @Sendable () -> Bool
   private let onBackgroundUpdate: @MainActor @Sendable (String) -> Void
+  private let onBackgroundWaitCountChanged:
+    (@MainActor @Sendable (Int) -> Void)?
   private var confirmations: [String: ApprovalConfirmation] = [:]
   private lazy var completionWatcher: VoiceSessionCompletionWatcher = .init(
     executor: executor,
+    onActiveCountChanged: onBackgroundWaitCountChanged,
     onUpdate: onBackgroundUpdate
   )
 
@@ -31,11 +34,13 @@ public final class VoiceToolCatalog: VoiceToolCataloging {
         forKey: AgentHubDefaults.voiceScreenCaptureEnabled
       ) as? Bool) ?? true
     },
+    onBackgroundWaitCountChanged: (@MainActor @Sendable (Int) -> Void)? = nil,
     onBackgroundUpdate: @escaping @MainActor @Sendable (String) -> Void
   ) {
     self.executor = executor
     self.screenCapture = screenCapture
     self.isScreenCaptureEnabled = isScreenCaptureEnabled
+    self.onBackgroundWaitCountChanged = onBackgroundWaitCountChanged
     self.onBackgroundUpdate = onBackgroundUpdate
   }
 
@@ -44,7 +49,10 @@ public final class VoiceToolCatalog: VoiceToolCataloging {
       listSessionsTool(),
       sessionStatusTool(),
       readResponseTool(),
+      readHistoryTool(),
       sendPromptTool(),
+      watchSessionTool(),
+      stopWatchingTool(),
       focusSessionTool(),
       listWorktreesTool(),
       launchSessionTool(),
@@ -97,6 +105,51 @@ public final class VoiceToolCatalog: VoiceToolCataloging {
     }
   }
 
+  private func readHistoryTool() -> VoiceTool {
+    VoiceTool(
+      name: "read_session_history",
+      description: """
+        Read a session's recent user/assistant exchanges, oldest first. Use
+        this when the user asks what they asked earlier, or what a session has
+        been working on beyond its latest answer. For just the latest answer,
+        prefer read_session_response.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "session_id": [
+            "type": "string",
+            "description": """
+              Exact ID returned by list_sessions. Omit to use the current
+              target session.
+              """,
+          ],
+          "turn_limit": [
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "description": "How many turns to return. Defaults to 6.",
+          ],
+        ]
+      )
+    ) { [weak self] data in
+      guard let self else { return Self.unavailableJSON }
+      let arguments = Self.decode(SessionHistoryArguments.self, from: data)
+      guard let history = await executor.sessionHistory(
+        sessionId: arguments?.sessionId,
+        turnLimit: arguments?.turnLimit
+          ?? VoiceSessionHistoryLimits.defaultTurnCount
+      ) else {
+        return Self.encode(
+          BasicToolResult(
+            status: "not_found",
+            message: "That session has no readable conversation yet."
+          )
+        )
+      }
+      return Self.encode(history)
+    }
+  }
+
   private func listSessionsTool() -> VoiceTool {
     VoiceTool(
       name: "list_sessions",
@@ -144,15 +197,31 @@ public final class VoiceToolCatalog: VoiceToolCataloging {
             "type": "string",
             "description": "Exact ID returned by list_sessions.",
           ],
+          "activity_limit": [
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "description": """
+              How many recent activities to return. Defaults to 3; only raise
+              it when the user asks for more detail.
+              """,
+          ],
         ],
         required: ["session_id"]
       )
     ) { [weak self] data in
       guard let self else { return Self.unavailableJSON }
-      guard let arguments = Self.decode(SessionArguments.self, from: data) else {
+      guard let arguments = Self.decode(
+        SessionStatusArguments.self,
+        from: data
+      ) else {
         return Self.invalidArgumentsJSON
       }
-      guard let detail = executor.sessionStatus(sessionId: arguments.sessionId) else {
+      guard let detail = executor.sessionStatus(
+        sessionId: arguments.sessionId,
+        activityLimit: arguments.activityLimit
+          ?? VoiceSessionStatusLimits.defaultActivityCount
+      ) else {
         return Self.encode(
           BasicToolResult(
             status: "not_found",
@@ -207,6 +276,83 @@ public final class VoiceToolCatalog: VoiceToolCataloging {
         completionWatcher.watch(sessionId: arguments.sessionId, name: name)
       }
       return Self.encode(result)
+    }
+  }
+
+  private func watchSessionTool() -> VoiceTool {
+    VoiceTool(
+      name: "watch_session",
+      description: """
+        Watch a session without sending it anything, and announce when it
+        finishes or needs approval. Use when the user asks to observe a
+        session, keep an eye on it, or be told when it's done — typically
+        while they work in a different session. If the watch times out,
+        AgentHub announces the session is still running.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "session_id": [
+            "type": "string",
+            "description": "Exact ID returned by list_sessions.",
+          ],
+        ],
+        required: ["session_id"]
+      )
+    ) { [weak self] data in
+      guard let self else { return Self.unavailableJSON }
+      guard let arguments = Self.decode(SessionArguments.self, from: data) else {
+        return Self.invalidArgumentsJSON
+      }
+      guard let detail = executor.sessionStatus(
+        sessionId: arguments.sessionId
+      ) else {
+        return Self.encode(
+          BasicToolResult(
+            status: "not_found",
+            message: "No session has that ID."
+          )
+        )
+      }
+      completionWatcher.watch(
+        sessionId: arguments.sessionId,
+        name: detail.name,
+        announceTimeout: true
+      )
+      return Self.encode(
+        BasicToolResult(
+          status: "watching",
+          message: "Watching \(detail.name)."
+        )
+      )
+    }
+  }
+
+  private func stopWatchingTool() -> VoiceTool {
+    VoiceTool(
+      name: "stop_watching",
+      description: """
+        Stop watching a session the user asked to observe. Omit session_id
+        to stop every active watch.
+        """,
+      parameters: objectSchema(
+        properties: [
+          "session_id": [
+            "type": "string",
+            "description": """
+              Exact ID returned by list_sessions. Omit to stop all watches.
+              """,
+          ],
+        ]
+      )
+    ) { [weak self] data in
+      guard let self else { return Self.unavailableJSON }
+      let arguments = Self.decode(OptionalSessionArguments.self, from: data)
+      if let sessionId = arguments?.sessionId {
+        completionWatcher.cancel(sessionId: sessionId)
+      } else {
+        completionWatcher.cancelAll()
+      }
+      return Self.encode(BasicToolResult(status: "stopped", message: nil))
     }
   }
 
@@ -555,6 +701,16 @@ private struct SessionArguments: Decodable {
 
 private struct OptionalSessionArguments: Decodable {
   let sessionId: String?
+}
+
+private struct SessionStatusArguments: Decodable {
+  let sessionId: String
+  let activityLimit: Int?
+}
+
+private struct SessionHistoryArguments: Decodable {
+  let sessionId: String?
+  let turnLimit: Int?
 }
 
 private struct SendPromptArguments: Decodable {

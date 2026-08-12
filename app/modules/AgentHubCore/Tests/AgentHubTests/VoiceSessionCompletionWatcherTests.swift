@@ -21,7 +21,10 @@ private final class CompletionWatcherExecutor: VoiceAgentToolExecuting {
     .init(sessions: [], targetSessionId: nil)
   }
 
-  func sessionStatus(sessionId: String) -> VoiceSessionStatusDetail? {
+  func sessionStatus(
+    sessionId: String,
+    activityLimit: Int
+  ) -> VoiceSessionStatusDetail? {
     guard let currentStatus else { return nil }
     return .init(
       sessionId: sessionId,
@@ -33,6 +36,13 @@ private final class CompletionWatcherExecutor: VoiceAgentToolExecuting {
       pendingApproval: nil,
       recentActivities: []
     )
+  }
+
+  func sessionHistory(
+    sessionId: String?,
+    turnLimit: Int
+  ) async -> VoiceSessionHistory? {
+    nil
   }
 
   func sendPrompt(
@@ -153,6 +163,93 @@ struct VoiceSessionCompletionWatcherTests {
     #expect(updates.count == 1)
     #expect(updates[0].contains("Build finished."))
     #expect(updates[0].contains("All 23 tests passed."))
+  }
+
+  @Test
+  func reportsActiveWatchCountAcrossTheWatchLifecycle() async {
+    let executor = CompletionWatcherExecutor()
+    var counts: [Int] = []
+    var updates: [String] = []
+    let watcher = VoiceSessionCompletionWatcher(
+      executor: executor,
+      armingDelay: .seconds(1),
+      completionDebounce: .milliseconds(5),
+      maximumDuration: .seconds(1),
+      onActiveCountChanged: { counts.append($0) }
+    ) {
+      updates.append($0)
+    }
+
+    watcher.watch(sessionId: "session-1", name: "Build")
+    #expect(counts.last == 1)
+
+    executor.yield(.thinking)
+    executor.yield(.idle)
+    await waitUntil { !updates.isEmpty }
+    await waitUntil { counts.last == 0 }
+
+    #expect(counts.last == 0)
+  }
+
+  @Test
+  func cancelAllReportsZeroActiveWatches() async {
+    let executor = CompletionWatcherExecutor()
+    var counts: [Int] = []
+    let watcher = VoiceSessionCompletionWatcher(
+      executor: executor,
+      armingDelay: .seconds(1),
+      completionDebounce: .seconds(1),
+      maximumDuration: .seconds(1),
+      onActiveCountChanged: { counts.append($0) }
+    ) { _ in }
+
+    watcher.watch(sessionId: "session-1", name: "Build")
+    #expect(counts.last == 1)
+
+    watcher.cancelAll()
+    #expect(counts.last == 0)
+  }
+
+  @Test
+  func explicitWatchAnnouncesTimeoutInsteadOfEndingSilently() async {
+    let executor = CompletionWatcherExecutor()
+    var updates: [String] = []
+    let watcher = VoiceSessionCompletionWatcher(
+      executor: executor,
+      armingDelay: .seconds(1),
+      completionDebounce: .seconds(1),
+      maximumDuration: .milliseconds(20)
+    ) {
+      updates.append($0)
+    }
+
+    watcher.watch(sessionId: "session-1", name: "Build", announceTimeout: true)
+    executor.yield(.thinking)
+    await waitUntil { !updates.isEmpty }
+
+    #expect(updates == ["Build is still running — I've stopped watching it."])
+  }
+
+  @Test
+  func implicitWatchStillTimesOutSilently() async {
+    let executor = CompletionWatcherExecutor()
+    var updates: [String] = []
+    var counts: [Int] = []
+    let watcher = VoiceSessionCompletionWatcher(
+      executor: executor,
+      armingDelay: .seconds(1),
+      completionDebounce: .seconds(1),
+      maximumDuration: .milliseconds(20),
+      onActiveCountChanged: { counts.append($0) }
+    ) {
+      updates.append($0)
+    }
+
+    watcher.watch(sessionId: "session-1", name: "Build")
+    executor.yield(.thinking)
+    await waitUntil { counts.last == 0 }
+
+    #expect(updates.isEmpty)
   }
 
   @Test

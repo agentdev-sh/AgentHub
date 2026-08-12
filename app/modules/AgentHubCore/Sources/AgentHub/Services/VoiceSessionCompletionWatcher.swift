@@ -2,15 +2,22 @@ import Foundation
 
 @MainActor
 public protocol VoiceSessionCompletionWatching: AnyObject {
-  func watch(sessionId: String, name: String)
+  func watch(sessionId: String, name: String, announceTimeout: Bool)
   func cancel(sessionId: String)
   func cancelAll()
+}
+
+extension VoiceSessionCompletionWatching {
+  public func watch(sessionId: String, name: String) {
+    watch(sessionId: sessionId, name: name, announceTimeout: false)
+  }
 }
 
 @MainActor
 public final class VoiceSessionCompletionWatcher: VoiceSessionCompletionWatching {
   private let executor: any VoiceAgentToolExecuting
   private let onUpdate: @MainActor @Sendable (String) -> Void
+  private let onActiveCountChanged: (@MainActor @Sendable (Int) -> Void)?
   private let armingDelay: Duration
   private let completionDebounce: Duration
   private let maximumDuration: Duration
@@ -21,16 +28,22 @@ public final class VoiceSessionCompletionWatcher: VoiceSessionCompletionWatching
     armingDelay: Duration = .seconds(10),
     completionDebounce: Duration = .seconds(2),
     maximumDuration: Duration = .seconds(1_800),
+    onActiveCountChanged: (@MainActor @Sendable (Int) -> Void)? = nil,
     onUpdate: @escaping @MainActor @Sendable (String) -> Void
   ) {
     self.executor = executor
     self.armingDelay = armingDelay
     self.completionDebounce = completionDebounce
     self.maximumDuration = maximumDuration
+    self.onActiveCountChanged = onActiveCountChanged
     self.onUpdate = onUpdate
   }
 
-  public func watch(sessionId: String, name: String) {
+  public func watch(
+    sessionId: String,
+    name: String,
+    announceTimeout: Bool
+  ) {
     cancel(sessionId: sessionId)
     let stream = executor.completionStream(sessionId: sessionId)
     let armingDelay = self.armingDelay
@@ -60,6 +73,9 @@ public final class VoiceSessionCompletionWatcher: VoiceSessionCompletionWatching
         capTask.cancel()
         continuation.finish()
         tasks.removeValue(forKey: sessionId)
+        // The single end-of-watch point: report, approval, cap, or cancel
+        // all pass through here.
+        onActiveCountChanged?(tasks.count)
       }
 
       var isArmed = false
@@ -98,11 +114,18 @@ public final class VoiceSessionCompletionWatcher: VoiceSessionCompletionWatching
           }
         }
       }
+      // Reached only when the maximum-duration cap finished the stream —
+      // every completion/approval report returns from inside the loop. An
+      // explicitly requested watch must not end silently.
+      guard announceTimeout, !Task.isCancelled else { return }
+      onUpdate("\(name) is still running — I've stopped watching it.")
     }
+    onActiveCountChanged?(tasks.count)
   }
 
   public func cancel(sessionId: String) {
     tasks.removeValue(forKey: sessionId)?.cancel()
+    onActiveCountChanged?(tasks.count)
   }
 
   public func cancelAll() {
@@ -111,6 +134,7 @@ public final class VoiceSessionCompletionWatcher: VoiceSessionCompletionWatching
     for task in running {
       task.cancel()
     }
+    onActiveCountChanged?(tasks.count)
   }
 
   private func reportCompletionIfStable(
